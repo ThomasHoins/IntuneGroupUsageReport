@@ -1,47 +1,44 @@
 <#
 .SYNOPSIS
-    Ermittelt Entra-ID-Gruppen, die für Intune-Zuweisungen verwendet werden.
+    Identifies Entra ID groups that are used for Intune assignments.
 
 .DESCRIPTION
-    Erfasst:
+    Captures:
       - Settings Catalog / Configuration Policies
-      - klassische Device Configurations
+      - Classic Device Configurations
       - Compliance Policies
-      - Mobile Apps inkl. Required / Available / Uninstall
+      - Mobile Apps including Required / Available / Uninstall
       - iOS Managed App Protection Policies
       - Android Managed App Protection Policies
       - Proactive Remediations / Device Management Scripts
       - Device Health Scripts
 
-    Für jedes Objekt werden Include- und Exclude-Zuweisungen getrennt
-    erfasst.
+    For each object, include and exclude assignments are captured separately.
 
-    Zusätzlich werden:
+    Additionally, the following are detected:
       - All Users
       - All Devices
 
-    erkannt.
+    Groups are resolved via Get-MgGroup and cached.
 
-    Gruppen werden über Get-MgGroup aufgelöst und gecacht.
-
-    Die eigentlichen Intune-Daten werden über Invoke-MgGraphRequest
-    aus dem Microsoft Graph PowerShell SDK gelesen. Dadurch können
-    v1.0- und Beta-Endpunkte gemischt verwendet werden.
+    The actual Intune data is read via Invoke-MgGraphRequest from the
+    Microsoft Graph PowerShell SDK. This allows mixing v1.0 and Beta
+    endpoints.
 
 .NOTES
     PowerShell 7+
     Microsoft.Graph
 
-    Benötigte Delegated Permissions:
+    Required Delegated Permissions:
 
       DeviceManagementConfiguration.Read.All
       DeviceManagementApps.Read.All
       DeviceManagementScripts.Read.All
       Group.Read.All
 
-    Keine Tenant-ID, Client-ID oder Credentials notwendig.
+    No Tenant ID, Client ID or Credentials required.
 
-    API-Versionen:
+    API Versions:
 
       v1.0:
         /deviceManagement/deviceConfigurations
@@ -55,9 +52,9 @@
         /deviceManagement/deviceManagementScripts
         /deviceManagement/deviceHealthScripts
 
-    Hinweis:
-      configurationPolicies sind aktuell weiterhin Beta.
-      Device Health Scripts / Proactive Remediations ebenfalls Beta.
+    Note:
+      configurationPolicies are currently still in Beta.
+      Device Health Scripts / Proactive Remediations are also Beta.
 #>
 
 #Requires -Version 7.0
@@ -84,7 +81,7 @@ $Scopes = @(
     "Group.Read.All"
 )
 
-Write-Host "Verbinde mit Microsoft Graph..." -ForegroundColor Cyan
+Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Cyan
 
 try {
     Connect-MgGraph `
@@ -93,23 +90,23 @@ try {
         -ErrorAction Stop
 }
 catch {
-    Write-Error "Microsoft Graph Anmeldung fehlgeschlagen: $($_.Exception.Message)"
+    Write-Error "Microsoft Graph authentication failed: $($_.Exception.Message)"
     return
 }
 
 # ---------------------------------------------------------------------------
-# 2. Globale Variablen
+# 2. Global Variables
 # ---------------------------------------------------------------------------
 
 $script:Results = [System.Collections.Generic.List[object]]::new()
 
-# Gruppen-Cache:
+# Group Cache:
 #   Key   = Entra Object ID
-#   Value = Hashtable mit Id / DisplayName
+#   Value = Hashtable with Id / DisplayName
 $script:GroupCache = @{}
 
 # ---------------------------------------------------------------------------
-# 3. Hilfsfunktion: Graph GET mit kompletter Pagination
+# 3. Helper Function: Graph GET with full pagination
 # ---------------------------------------------------------------------------
 
 function Invoke-GraphGetAll {
@@ -141,7 +138,7 @@ function Invoke-GraphGetAll {
             }
         }
 
-        # Graph liefert bei Pagination @odata.nextLink.
+        # Graph returns @odata.nextLink for pagination.
         $NextUri = $Response.'@odata.nextLink'
     }
 
@@ -149,7 +146,7 @@ function Invoke-GraphGetAll {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Gruppenauflösung mit Cache
+# 4. Group Resolution with Cache
 # ---------------------------------------------------------------------------
 
 function Resolve-EntraGroup {
@@ -163,7 +160,7 @@ function Resolve-EntraGroup {
         return $null
     }
 
-    # Bereits im Cache?
+    # Already in cache?
     if ($script:GroupCache.ContainsKey($GroupId)) {
         return $script:GroupCache[$GroupId]
     }
@@ -192,18 +189,18 @@ function Resolve-EntraGroup {
         return $Resolved
     }
     catch {
-        Write-Warning "Gruppe $GroupId konnte nicht aufgelöst werden: $($_.Exception.Message)"
+        Write-Warning "Group $GroupId could not be resolved: $($_.Exception.Message)"
 
         $Resolved = [PSCustomObject]@{
             Id              = $GroupId
-            DisplayName     = "<nicht auflösbar>"
+            DisplayName     = "<unresolvable>"
             Mail            = ""
             SecurityEnabled = $null
             GroupTypes      = ""
         }
 
-        # Auch Fehler werden gecacht, damit dieselbe kaputte ID
-        # nicht bei jedem Assignment erneut abgefragt wird.
+        # Cache errors as well, so the same broken ID
+        # is not queried again for each assignment.
         $script:GroupCache[$GroupId] = $Resolved
 
         return $Resolved
@@ -211,7 +208,7 @@ function Resolve-EntraGroup {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Assignment Target analysieren
+# 5. Analyze Assignment Target
 # ---------------------------------------------------------------------------
 
 function Resolve-AssignmentTarget {
@@ -261,11 +258,11 @@ function Resolve-AssignmentTarget {
     }
 
     # -----------------------------------------------------------------------
-    # Gruppen
+    # Groups
     #
-    # Je nach API-Version / Ressourcentyp kann die ID unterschiedlich
-    # heißen. Ältere Intune APIs verwenden teilweise groupId, neuere
-    # Targets teilweise entraObjectId.
+    # Depending on API version / resource type, the ID may have different
+    # names. Older Intune APIs sometimes use groupId, newer targets
+    # sometimes use entraObjectId.
     # -----------------------------------------------------------------------
 
     $GroupId = $null
@@ -281,7 +278,7 @@ function Resolve-AssignmentTarget {
 
         $Group = Resolve-EntraGroup -GroupId $GroupId
 
-        # Exclusion wird über den OData-Typ erkannt.
+        # Exclusion is detected via the OData type.
         $AssignmentType = "Include"
 
         if (
@@ -300,7 +297,7 @@ function Resolve-AssignmentTarget {
     }
 
     # -----------------------------------------------------------------------
-    # Unbekanntes Target
+    # Unknown Target
     # -----------------------------------------------------------------------
 
     return [PSCustomObject]@{
@@ -312,7 +309,7 @@ function Resolve-AssignmentTarget {
 }
 
 # ---------------------------------------------------------------------------
-# 6. Assignment-Information in Ergebnisobjekt schreiben
+# 6. Write Assignment Information to Result Object
 # ---------------------------------------------------------------------------
 
 function Add-IntuneObject {
@@ -408,7 +405,7 @@ function Add-IntuneObject {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Kategorie aus Graph lesen
+# 7. Read Category from Graph
 # ---------------------------------------------------------------------------
 
 function Get-IntuneCategory {
@@ -443,11 +440,11 @@ function Get-IntuneCategory {
         $Objects = Invoke-GraphGetAll `
             -Uri "https://graph.microsoft.com/$ApiVersion$ObjectEndpoint"
 
-        Write-Host "Objekte gefunden: $($Objects.Count)" -ForegroundColor Gray
+        Write-Host "Objects found: $($Objects.Count)" -ForegroundColor Gray
     }
     catch {
 
-        Write-Warning "$Name konnte nicht gelesen werden: $($_.Exception.Message)"
+        Write-Warning "$Name could not be read: $($_.Exception.Message)"
         return
     }
 
@@ -463,13 +460,13 @@ function Get-IntuneCategory {
             }
 
             if ([string]::IsNullOrWhiteSpace($DisplayName)) {
-                $DisplayName = "<ohne Namen>"
+                $DisplayName = "<unnamed>"
             }
 
             $ObjectId = [string]$Object.id
 
             if ([string]::IsNullOrWhiteSpace($ObjectId)) {
-                Write-Warning "$Name enthält ein Objekt ohne ID."
+                Write-Warning "$Name contains an object without an ID."
                 continue
             }
 
@@ -481,11 +478,11 @@ function Get-IntuneCategory {
 
             $Intent = ""
 
-            # Apps haben zusätzlich Required / Available / Uninstall.
+            # Apps additionally have Required / Available / Uninstall.
             if ($UseIntent -and $Assignments.Count -gt 0) {
 
-                # Bei mehreren Assignments wird der Intent pro Assignment
-                # im Ergebnis zusammengeführt.
+                # With multiple assignments, the intent per assignment
+                # is combined in the result.
                 $Intents = @(
                     $Assignments |
                     ForEach-Object {
@@ -510,7 +507,7 @@ function Get-IntuneCategory {
         catch {
 
             Write-Warning `
-                "$Name '$($Object.displayName)' konnte nicht vollständig verarbeitet werden: $($_.Exception.Message)"
+                "$Name '$($Object.displayName)' could not be processed completely: $($_.Exception.Message)"
         }
     }
 }
@@ -522,8 +519,8 @@ function Get-IntuneCategory {
 # API:
 #   GET /deviceManagement/configurationPolicies
 #
-# Aktuell Beta.
-# Microsoft dokumentiert configurationPolicies weiterhin als Beta.
+# Currently Beta.
+# Microsoft continues to document configurationPolicies as Beta.
 #
 # Permission:
 #   DeviceManagementConfiguration.Read.All
@@ -539,14 +536,14 @@ Get-IntuneCategory `
     -UseNameProperty
 
 # ===========================================================================
-# 9. Klassische Device Configurations
+# 9. Classic Device Configurations
 # ===========================================================================
 #
 # API:
 #   GET /deviceManagement/deviceConfigurations
 #   GET /deviceManagement/deviceConfigurations/{id}/assignments
 #
-# v1.0 verfügbar.
+# Available in v1.0.
 # ===========================================================================
 
 Get-IntuneCategory `
@@ -564,7 +561,7 @@ Get-IntuneCategory `
 #   GET /deviceManagement/deviceCompliancePolicies
 #   GET /deviceManagement/deviceCompliancePolicies/{id}/assignments
 #
-# v1.0 verfügbar.
+# Available in v1.0.
 # ===========================================================================
 
 Get-IntuneCategory `
@@ -582,11 +579,11 @@ Get-IntuneCategory `
 #   GET /deviceAppManagement/mobileApps
 #   GET /deviceAppManagement/mobileApps/{id}/assignments
 #
-# v1.0 verfügbar.
+# Available in v1.0.
 #
-# Wichtig:
-# Microsoft empfiehlt inzwischen ausdrücklich, die Apps zunächst ohne
-# $expand=assignments zu laden und danach die Assignments pro App zu lesen.
+# Important:
+# Microsoft now explicitly recommends loading apps first without
+# $expand=assignments and then reading assignments per app.
 # ===========================================================================
 
 Get-IntuneCategory `
@@ -637,7 +634,7 @@ Get-IntuneCategory `
 # 14. Proactive Remediations / Device Management Scripts
 # ===========================================================================
 #
-# Aktueller Graph-Endpoint:
+# Current Graph Endpoint:
 #
 #   GET /deviceManagement/deviceManagementScripts
 #   GET /deviceManagement/deviceManagementScripts/{id}/assignments
@@ -647,8 +644,8 @@ Get-IntuneCategory `
 # Permission:
 #   DeviceManagementScripts.Read.All
 #
-# Je nach Tenant/API-Stand kann dieser Endpoint eingeschränkt bzw.
-# unterschiedlich verfügbar sein.
+# Depending on tenant/API status, this endpoint may be limited or
+# available differently.
 # ===========================================================================
 
 Get-IntuneCategory `
@@ -662,14 +659,14 @@ Get-IntuneCategory `
 # 15. Device Health Scripts
 # ===========================================================================
 #
-# Aktueller Graph-Endpoint:
+# Current Graph Endpoint:
 #
 #   GET /deviceManagement/deviceHealthScripts
 #   GET /deviceManagement/deviceHealthScripts/{id}/assignments
 #
 # Beta.
 #
-# Device Health Scripts verwenden DeviceManagementScripts.Read.All.
+# Device Health Scripts use DeviceManagementScripts.Read.All.
 # ===========================================================================
 
 Get-IntuneCategory `
@@ -680,18 +677,18 @@ Get-IntuneCategory `
     -ApiVersion "beta"
 
 # ===========================================================================
-# 16. Ergebnis ausgeben
+# 16. Output Results
 # ===========================================================================
 
 Write-Host ""
 Write-Host "==================================================" -ForegroundColor Cyan
-Write-Host "Ergebnis" -ForegroundColor Cyan
+Write-Host "Results" -ForegroundColor Cyan
 Write-Host "==================================================" -ForegroundColor Cyan
 
-Write-Host "Intune-Objekte : $($script:Results.Count)"
-Write-Host "Gruppen im Cache: $($script:GroupCache.Count)"
+Write-Host "Intune Objects: $($script:Results.Count)"
+Write-Host "Groups in Cache: $($script:GroupCache.Count)"
 
-# Objekt-/Assignment-Sicht
+# Object/Assignment View
 $script:Results |
     Sort-Object ObjectType, Name |
     Format-Table `
@@ -717,22 +714,22 @@ try {
             -Encoding UTF8
 
     Write-Host ""
-    Write-Host "CSV geschrieben: $CsvPath" -ForegroundColor Green
+    Write-Host "CSV written: $CsvPath" -ForegroundColor Green
 }
 catch {
 
-    Write-Warning "CSV konnte nicht geschrieben werden: $($_.Exception.Message)"
+    Write-Warning "CSV could not be written: $($_.Exception.Message)"
 }
 
 # ===========================================================================
-# 18. Optionale gruppenzentrierte Sicht
+# 18. Optional Group-centric View
 # ===========================================================================
 
 if ($CreateReverseLookup) {
 
     Write-Host ""
     Write-Host "==================================================" -ForegroundColor Cyan
-    Write-Host "Gruppenzentrierte Sicht" -ForegroundColor Cyan
+    Write-Host "Group-centric View" -ForegroundColor Cyan
     Write-Host "==================================================" -ForegroundColor Cyan
 
     $ReverseLookup = foreach ($GroupId in $script:GroupCache.Keys) {
@@ -811,18 +808,18 @@ if ($CreateReverseLookup) {
                 -Encoding UTF8
 
         Write-Host ""
-        Write-Host "Reverse CSV geschrieben: $ReverseCsvPath" `
+        Write-Host "Reverse CSV written: $ReverseCsvPath" `
             -ForegroundColor Green
     }
     catch {
 
         Write-Warning `
-            "Reverse CSV konnte nicht geschrieben werden: $($_.Exception.Message)"
+            "Reverse CSV could not be written: $($_.Exception.Message)"
     }
 }
 
 # ===========================================================================
-# 19. Ergebnis auch als PowerShell-Objekt zurückgeben
+# 19. Also return results as PowerShell object
 # ===========================================================================
 
 $script:Results
