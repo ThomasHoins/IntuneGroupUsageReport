@@ -70,36 +70,29 @@ The script writes:
 
 The default CSV is grouped by Entra group, which makes it easier to answer questions such as: “Which policies and apps are assigned to this group?”
 
+The actual CSV contains three columns:
+
+- GroupName
+- GroupId
+- UsedIn
+
 Example CSV output:
 
 ```csv
-GroupName,GroupId,UsedIn,AllUsers,AllDevices,IncludeGroups,ExcludeGroups
-IT Admins,9b0d2b12-1d5b-4b13-a6cf-f274fa10f219,"Configuration Profile - Corporate WiFi | Compliance Policy - Windows 10 | Mobile App - Teams",False,False,"IT Admins",""
-Engineering,20b5fd71-0ee7-4b4c-a5d1-0c3d7231bb7a,"Device Configuration - Laptops | Proactive Remediation - Disk Cleanup",False,False,"Engineering","HR Exclusions"
-All Users,,"Compliance Policy - Baseline | App Protection - Finance iOS",True,False,"",""
+GroupName,GroupId,UsedIn
+"IT Admins","9b0d2b12-1d5b-4b13-a6cf-f274fa10f219","Configuration Profile / Settings Catalog: Corporate WiFi [Include] | Compliance Policy: Windows 10 [Include] | Mobile App: Teams [Include] <Required>"
+"Engineering","20b5fd71-0ee7-4b4c-a5d1-0c3d7231bb7a","Device Configuration: Laptops [Include] | Proactive Remediation: Disk Cleanup [Exclude]"
+"All Users","","Compliance Policy: Baseline [Include] | App Protection: Finance iOS [Include]"
 ```
 
 Example console summary:
 
 ```text
-==================================================
-Group-centric View
-==================================================
-Group: IT Admins (9b0d2b12-1d5b-4b13-a6cf-f274fa10f219)
-  Used by:
-    - Configuration Profile - Corporate WiFi
-    - Compliance Policy - Windows 10
-    - Mobile App - Teams
-
-Group: Engineering (20b5fd71-0ee7-4b4c-a5d1-0c3d7231bb7a)
-  Used by:
-    - Device Configuration - Laptops
-    - Proactive Remediation - Disk Cleanup
-
-Group: All Users
-  Used by:
-    - Compliance Policy - Baseline
-    - App Protection - Finance iOS
+GroupName                     GroupId                              UsedIn
+---------                     -------                              ------
+IT Admins                     9b0d2b12-1d5b-4b13-a6cf-f274fa10f219  Configuration Profile / Settings Catalog: Corporate WiFi [Include] | Compliance Policy: Windows 10 [Include] | Mobile App: Teams [Include] <Required>
+Engineering                   20b5fd71-0ee7-4b4c-a5d1-0c3d7231bb7a  Device Configuration: Laptops [Include] | Proactive Remediation: Disk Cleanup [Exclude]
+All Users                     ""                                 Compliance Policy: Baseline [Include] | App Protection: Finance iOS [Include]
 ```
 
 ## Notes
