@@ -1,8 +1,10 @@
 <#
 .VERSION
-    1.0.0
+    1.1.0
 
 .VERSIONHISTORY
+    2026-08-19 | 1.1.0 - Versioning cleanup, explicit script version tracking,
+            and updated project documentation.
     2026-08-19 | 1.0.0 - Initial version with group-centric reporting, Graph
             pagination handling, direct Graph requests replaced with
             Invoke-MgGraphRequest, and README updates.
@@ -80,7 +82,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$script:Version = "1.0.0"
+$script:Version = "1.1.0"
 
 # ---------------------------------------------------------------------------
 # 1. Authentication
