@@ -1,0 +1,7 @@
+# Generated report files
+*.csv
+*.txt
+
+# Optional explicit report names
+Intune-GroupAssignments.csv
+Intune-GroupAssignments-Reverse.csv
