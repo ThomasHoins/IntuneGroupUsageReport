@@ -1,4 +1,12 @@
 <#
+.VERSION
+    1.0.0
+
+.VERSIONHISTORY
+    2026-08-19 | 1.0.0 - Initial version with group-centric reporting, Graph
+            pagination handling, direct Graph requests replaced with
+            Invoke-MgGraphRequest, and README updates.
+
 .SYNOPSIS
     Identifies Entra ID groups that are used for Intune assignments.
 
@@ -19,7 +27,7 @@
       - All Users
       - All Devices
 
-    Groups are resolved via Get-MgGroup and cached.
+    Groups are resolved via Invoke-MgGraphRequest and cached.
 
     The actual Intune data is read via Invoke-MgGraphRequest from the
     Microsoft Graph PowerShell SDK. This allows mixing v1.0 and Beta
@@ -27,7 +35,9 @@
 
 .NOTES
     PowerShell 7+
-    Microsoft.Graph
+    Microsoft.Graph.Applications
+    Microsoft.Graph.Authentication
+
 
     Required Delegated Permissions:
 
@@ -58,7 +68,7 @@
 #>
 
 #Requires -Version 7.0
-#Requires -Modules Microsoft.Graph
+#Requires -Modules Microsoft.Graph.Authentication
 
 [CmdletBinding()]
 param(
@@ -69,6 +79,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+$script:Version = "1.0.0"
 
 # ---------------------------------------------------------------------------
 # 1. Authentication
@@ -110,6 +122,18 @@ $script:GroupCache = @{}
 # ---------------------------------------------------------------------------
 
 function Invoke-GraphGetAll {
+    <#
+    .SYNOPSIS
+        Retrieves all pages for a Microsoft Graph GET request.
+
+    .DESCRIPTION
+        Uses Invoke-MgGraphRequest repeatedly until @odata.nextLink is exhausted.
+        This handles paginated responses from Microsoft Graph and normalizes
+        dictionary-based payloads returned by newer Graph endpoints.
+
+    .PARAMETER Uri
+        The Graph resource URL to query.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -132,17 +156,97 @@ function Invoke-GraphGetAll {
             throw
         }
 
-        if ($Response.value) {
-            foreach ($Item in $Response.value) {
+        $PageItems = @()
+
+        if ($Response -and $Response -is [System.Collections.IDictionary]) {
+            if ($Response.Contains('value')) {
+                $PageItems = @($Response['value'])
+            }
+            elseif ($Response.Contains('@odata.nextLink')) {
+                $PageItems = @($Response)
+            }
+        }
+        elseif ($Response -and $Response.PSObject.Properties.Name -contains 'value') {
+            $PageItems = @($Response.value)
+        }
+        elseif ($Response -and $Response -is [System.Collections.IEnumerable] -and -not ($Response -is [string])) {
+            $PageItems = @($Response)
+        }
+
+        foreach ($Item in $PageItems) {
+            if ($null -ne $Item) {
                 $Items.Add($Item)
             }
         }
 
-        # Graph returns @odata.nextLink for pagination.
-        $NextUri = $Response.'@odata.nextLink'
+        # Graph returns @odata.nextLink only when additional pages exist.
+        # Some endpoints return a single page without this property.
+        $NextUri = $null
+        if ($Response -and $Response -is [System.Collections.IDictionary]) {
+            if ($Response.Contains('@odata.nextLink')) {
+                $NextUri = [string]$Response['@odata.nextLink']
+            }
+        }
+        elseif ($Response -and $Response.PSObject.Properties.Name -contains '@odata.nextLink') {
+            $NextUri = [string]$Response.'@odata.nextLink'
+        }
+
+        if ([string]::IsNullOrWhiteSpace($NextUri)) {
+            $NextUri = $null
+        }
     }
 
     return $Items
+}
+
+function Get-ObjectPropertyValue {
+    <#
+    .SYNOPSIS
+        Safely reads a property from either a dictionary or an object.
+
+    .DESCRIPTION
+        Graph responses in this script are sometimes returned as hashtables or
+        dictionaries instead of PSCustomObjects. This helper abstracts the lookup
+        so property access is safe across both response shapes.
+
+    .PARAMETER InputObject
+        The object or dictionary to inspect.
+
+    .PARAMETER PropertyName
+        The property name to read.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        $InputObject,
+
+        [Parameter(Mandatory)]
+        [string]$PropertyName
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        if ($InputObject.Contains($PropertyName)) {
+            return $InputObject[$PropertyName]
+        }
+        return $null
+    }
+
+    if ($InputObject -is [System.Collections.Hashtable]) {
+        if ($InputObject.ContainsKey($PropertyName)) {
+            return $InputObject[$PropertyName]
+        }
+        return $null
+    }
+
+    if ($InputObject.PSObject.Properties.Name -contains $PropertyName) {
+        return $InputObject.$PropertyName
+    }
+
+    return $null
 }
 
 # ---------------------------------------------------------------------------
@@ -150,6 +254,18 @@ function Invoke-GraphGetAll {
 # ---------------------------------------------------------------------------
 
 function Resolve-EntraGroup {
+    <#
+    .SYNOPSIS
+        Resolves an Entra group by object ID.
+
+    .DESCRIPTION
+        Looks up a single Microsoft Entra group via Graph and caches the result so
+        later assignments do not trigger repeated queries. Missing or invalid
+        groups are stored as a fallback entry to avoid repeated lookups.
+
+    .PARAMETER GroupId
+        The Entra object ID of the group to resolve.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -166,22 +282,37 @@ function Resolve-EntraGroup {
     }
 
     try {
-        $Group = Get-MgGroup `
-            -GroupId $GroupId `
-            -Property "id,displayName,mail,securityEnabled,groupTypes" `
+        $GroupUri = "https://graph.microsoft.com/v1.0/groups/" + [System.Uri]::EscapeDataString($GroupId) + "?%24select=id,displayName,mail,securityEnabled,groupTypes"
+
+        $Group = Invoke-MgGraphRequest `
+            -Method GET `
+            -Uri $GroupUri `
             -ErrorAction Stop
 
         $Resolved = [PSCustomObject]@{
-            Id              = $Group.Id
-            DisplayName     = $Group.DisplayName
-            Mail            = $Group.Mail
-            SecurityEnabled = $Group.SecurityEnabled
-            GroupTypes      = if ($Group.GroupTypes) {
-                ($Group.GroupTypes -join ";")
+            Id              = [string](Get-ObjectPropertyValue -InputObject $Group -PropertyName 'id')
+            DisplayName     = [string](Get-ObjectPropertyValue -InputObject $Group -PropertyName 'displayName')
+            Mail            = [string](Get-ObjectPropertyValue -InputObject $Group -PropertyName 'mail')
+            SecurityEnabled = Get-ObjectPropertyValue -InputObject $Group -PropertyName 'securityEnabled'
+            GroupTypes      = $null
+        }
+
+        if ($Resolved.SecurityEnabled -is [System.Collections.IEnumerable] -and -not ($Resolved.SecurityEnabled -is [string])) {
+            $Resolved.GroupTypes = ($Resolved.SecurityEnabled -join ";")
+        }
+
+        $RawGroupTypes = Get-ObjectPropertyValue -InputObject $Group -PropertyName 'groupTypes'
+        if ($null -ne $RawGroupTypes) {
+            if ($RawGroupTypes -is [System.Collections.IEnumerable] -and -not ($RawGroupTypes -is [string])) {
+                $Resolved.GroupTypes = ($RawGroupTypes -join ";")
             }
             else {
-                ""
+                $Resolved.GroupTypes = [string]$RawGroupTypes
             }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($Resolved.GroupTypes)) {
+            $Resolved.GroupTypes = ""
         }
 
         $script:GroupCache[$GroupId] = $Resolved
@@ -212,6 +343,18 @@ function Resolve-EntraGroup {
 # ---------------------------------------------------------------------------
 
 function Resolve-AssignmentTarget {
+    <#
+    .SYNOPSIS
+        Normalizes a single Intune assignment target.
+
+    .DESCRIPTION
+        Converts a Graph assignment target into a common shape for downstream
+        evaluation. It recognizes all-users, all-devices, and Entra group
+        assignments, including include/exclude targets.
+
+    .PARAMETER Target
+        The raw target object from a Graph assignment payload.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -313,6 +456,32 @@ function Resolve-AssignmentTarget {
 # ---------------------------------------------------------------------------
 
 function Add-IntuneObject {
+    <#
+    .SYNOPSIS
+        Stores one Intune object and its group assignment summary.
+
+    .DESCRIPTION
+        Evaluates all assignment targets for a single Intune object and records the
+        included and excluded Entra groups, as well as all-users/all-devices usage.
+
+    .PARAMETER Name
+        The display name of the Intune object.
+
+    .PARAMETER ObjectType
+        The Intune object category such as Mobile App or Compliance Policy.
+
+    .PARAMETER ObjectId
+        The unique object ID returned by Graph.
+
+    .PARAMETER ApiVersion
+        The Graph API version used for this object type.
+
+    .PARAMETER Assignments
+        The raw assignment objects returned by the Graph assignments endpoint.
+
+    .PARAMETER Intent
+        Optional mobile app intent such as required, available, or uninstall.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -409,6 +578,36 @@ function Add-IntuneObject {
 # ---------------------------------------------------------------------------
 
 function Get-IntuneCategory {
+    <#
+    .SYNOPSIS
+        Reads one Intune object category from Microsoft Graph.
+
+    .DESCRIPTION
+        Queries a category such as configuration policies or mobile apps, resolves
+        each item's assignments, and adds the resulting group usage information to
+        the script-wide results list.
+
+    .PARAMETER Name
+        Human-readable name used for logging.
+
+    .PARAMETER ObjectEndpoint
+        The Graph endpoint that returns the objects in this category.
+
+    .PARAMETER AssignmentEndpointTemplate
+        The Graph URL template for the assignments of each object, replacing {id}.
+
+    .PARAMETER ObjectType
+        The output category name used in the result set.
+
+    .PARAMETER ApiVersion
+        The Graph API version to query for this category, either v1.0 or beta.
+
+    .PARAMETER UseNameProperty
+        Indicates that the object uses name instead of displayName.
+
+    .PARAMETER UseIntent
+        Indicates that assignment intents should be aggregated in the output.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -452,18 +651,30 @@ function Get-IntuneCategory {
 
         try {
 
-            if ($UseNameProperty) {
-                $DisplayName = [string]$Object.name
-            }
-            else {
-                $DisplayName = [string]$Object.displayName
+            if ($null -eq $Object) {
+                continue
             }
 
+            $ObjectNameValue = $null
+            if ($UseNameProperty) {
+                $ObjectNameValue = Get-ObjectPropertyValue -InputObject $Object -PropertyName 'name'
+                if ($null -eq $ObjectNameValue) {
+                    $ObjectNameValue = Get-ObjectPropertyValue -InputObject $Object -PropertyName 'displayName'
+                }
+            }
+            else {
+                $ObjectNameValue = Get-ObjectPropertyValue -InputObject $Object -PropertyName 'displayName'
+                if ($null -eq $ObjectNameValue) {
+                    $ObjectNameValue = Get-ObjectPropertyValue -InputObject $Object -PropertyName 'name'
+                }
+            }
+
+            $DisplayName = [string]$ObjectNameValue
             if ([string]::IsNullOrWhiteSpace($DisplayName)) {
                 $DisplayName = "<unnamed>"
             }
 
-            $ObjectId = [string]$Object.id
+            $ObjectId = [string](Get-ObjectPropertyValue -InputObject $Object -PropertyName 'id')
 
             if ([string]::IsNullOrWhiteSpace($ObjectId)) {
                 Write-Warning "$Name contains an object without an ID."
@@ -506,8 +717,15 @@ function Get-IntuneCategory {
         }
         catch {
 
+            $ObjectNameForWarning = Get-ObjectPropertyValue -InputObject $Object -PropertyName 'displayName'
+            if ($null -eq $ObjectNameForWarning) {
+                $ObjectNameForWarning = Get-ObjectPropertyValue -InputObject $Object -PropertyName 'name'
+            }
+
+            $ObjectLabel = if ([string]::IsNullOrWhiteSpace([string]$ObjectNameForWarning)) { "<unnamed>" } else { [string]$ObjectNameForWarning }
+
             Write-Warning `
-                "$Name '$($Object.displayName)' could not be processed completely: $($_.Exception.Message)"
+                "$Name '$ObjectLabel' could not be processed completely: $($_.Exception.Message)"
         }
     }
 }
@@ -688,26 +906,72 @@ Write-Host "==================================================" -ForegroundColor
 Write-Host "Intune Objects: $($script:Results.Count)"
 Write-Host "Groups in Cache: $($script:GroupCache.Count)"
 
-# Object/Assignment View
-$script:Results |
-    Sort-Object ObjectType, Name |
-    Format-Table `
-        Name,
-        ObjectType,
-        Intent,
-        IncludeGroups,
-        ExcludeGroups,
-        AllUsers,
-        AllDevices `
-        -AutoSize
+# Group-centric View (primary report)
+Write-Host ""
+Write-Host "==================================================" -ForegroundColor Cyan
+Write-Host "Group-centric View" -ForegroundColor Cyan
+Write-Host "==================================================" -ForegroundColor Cyan
+
+$GroupUsageSummary = foreach ($GroupId in $script:GroupCache.Keys) {
+
+    $Group = $script:GroupCache[$GroupId]
+
+    $Usages = foreach ($Result in $script:Results) {
+
+        $Include = $false
+        $Exclude = $false
+
+        if ($Result.IncludeGroupIds) {
+            $Include = $Result.IncludeGroupIds `
+                -split "\s*\|\s*" |
+                Where-Object { $_ -eq $GroupId }
+        }
+
+        if ($Result.ExcludeGroupIds) {
+            $Exclude = $Result.ExcludeGroupIds `
+                -split "\s*\|\s*" |
+                Where-Object { $_ -eq $GroupId }
+        }
+
+        if ($Include -or $Exclude) {
+            $Assignment = if ($Exclude) { "Exclude" } else { "Include" }
+
+            [PSCustomObject]@{
+                ObjectType = $Result.ObjectType
+                Name       = $Result.Name
+                ObjectId   = $Result.ObjectId
+                Intent     = $Result.Intent
+                Assignment = $Assignment
+            }
+        }
+    }
+
+    if ($Usages) {
+        [PSCustomObject]@{
+            GroupName = $Group.DisplayName
+            GroupId   = $Group.Id
+            UsedIn    = (
+                $Usages |
+                ForEach-Object {
+                    "$($_.ObjectType): $($_.Name) [$($_.Assignment)]" +
+                    $(if ($_.Intent) { " <$($_.Intent)>" } else { "" })
+                }
+            ) -join " | "
+        }
+    }
+}
+
+$GroupUsageSummary |
+    Sort-Object GroupName |
+    Format-Table -AutoSize
 
 # ===========================================================================
-# 17. CSV Export
+# 17. CSV Export (group-centric)
 # ===========================================================================
 
 try {
 
-    $script:Results |
+    $GroupUsageSummary |
         Export-Csv `
             -Path $CsvPath `
             -NoTypeInformation `
@@ -732,63 +996,7 @@ if ($CreateReverseLookup) {
     Write-Host "Group-centric View" -ForegroundColor Cyan
     Write-Host "==================================================" -ForegroundColor Cyan
 
-    $ReverseLookup = foreach ($GroupId in $script:GroupCache.Keys) {
-
-        $Group = $script:GroupCache[$GroupId]
-
-        $Usages = foreach ($Result in $script:Results) {
-
-            $Include = $false
-            $Exclude = $false
-
-            if ($Result.IncludeGroupIds) {
-                $Include = $Result.IncludeGroupIds `
-                    -split "\s*\|\s*" |
-                    Where-Object { $_ -eq $GroupId }
-            }
-
-            if ($Result.ExcludeGroupIds) {
-                $Exclude = $Result.ExcludeGroupIds `
-                    -split "\s*\|\s*" |
-                    Where-Object { $_ -eq $GroupId }
-            }
-
-            if ($Include -or $Exclude) {
-
-                $Assignment = if ($Exclude) {
-                    "Exclude"
-                }
-                else {
-                    "Include"
-                }
-
-                [PSCustomObject]@{
-                    ObjectType = $Result.ObjectType
-                    Name       = $Result.Name
-                    ObjectId   = $Result.ObjectId
-                    Intent     = $Result.Intent
-                    Assignment = $Assignment
-                }
-            }
-        }
-
-        if ($Usages) {
-
-            [PSCustomObject]@{
-                GroupName = $Group.DisplayName
-                GroupId   = $Group.Id
-                UsedIn    = (
-                    $Usages |
-                    ForEach-Object {
-                        "$($_.ObjectType): $($_.Name) [$($_.Assignment)]" +
-                        $(if ($_.Intent) { " <$($_.Intent)>" } else { "" })
-                    }
-                ) -join " | "
-            }
-        }
-    }
-
-    $ReverseLookup |
+    $GroupUsageSummary |
         Sort-Object GroupName |
         Format-Table -AutoSize
 
@@ -801,7 +1009,7 @@ if ($CreateReverseLookup) {
 
     try {
 
-        $ReverseLookup |
+        $GroupUsageSummary |
             Export-Csv `
                 -Path $ReverseCsvPath `
                 -NoTypeInformation `
@@ -819,7 +1027,7 @@ if ($CreateReverseLookup) {
 }
 
 # ===========================================================================
-# 19. Also return results as PowerShell object
+# 19. Also return group-centric results as PowerShell object
 # ===========================================================================
 
-$script:Results
+$GroupUsageSummary
